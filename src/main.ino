@@ -8,7 +8,7 @@
 
 using namespace std;
 
-//M-Bus constant initalization
+// M-Bus constant initalization
 #define DEBUG true
 #define MBUS_BAUD_RATE 2400
 #define MBUS_TIMEOUT 1000 // milliseconds
@@ -17,12 +17,93 @@ using namespace std;
 #define MBUS_BAD_FRAME false
 uint8_t MBusSize;
 HardwareSerial *customSerial;
-LinkedList<int> addressList = LinkedList<int>(); // Linked list that holds all found M-Bus addresses
-LinkedList<String> dataList = LinkedList<String>(); // Linked list that holds data from M-Bus requests
-LinkedList<byte> dataList2 = LinkedList<byte>(); // Linked list that holds data from M-Bus requests
 char packet[64];
 
-//LoRaWAN constant initialization
+class MBusDevice { // Objects of this class are tied to specific M-Bus addresses. Each object can create a custom payload from the M-Bus device based on a given recipe. Recipes can be given via downlinks
+  public:
+    MBusDevice(uint8_t address) { // Constructor
+      // Sets the M-Bus-address for the device
+      deviceAddress = address;
+      return;
+    }
+
+    LinkedList<byte> getRawPackage() { // Get a full, raw M-Bus package
+      // Todo
+      mbusRequest(deviceAddress);
+      LinkedList<byte> package = rawPackage;
+      return package;
+    }
+
+    LinkedList<byte> getPackage() { // Make request and then return customPackage based on the recipe
+      createPackage(deviceAddress, recipe, rawPackage);
+      return customPackage;
+    }
+
+    uint8_t getAddress() { // Gets the address of the device
+      return deviceAddress;
+    }
+
+    LinkedList<bool> getRecipe() { // Get a the recipe for custom packages
+      // if no recipe is present return errorList with only single false member
+      if (hasRecipe == false) {
+        LinkedList<bool> errorList = LinkedList<bool>();
+        errorList.add(false);
+        return errorList;
+      }
+      else {
+        return recipe;
+      }
+    }
+
+    void setRecipe(LinkedList<bool> downlinkRecipe) { // Set a custom recipe for the device
+      // Overwrites any old recipe
+      recipe = downlinkRecipe;
+      hasRecipe = true;
+      return;
+    }
+    
+    void removeRecipe() { // Clears the custom recipe for the device
+      recipe.clear();
+      bool hasRecipe = false;
+      return;
+    }
+
+    void setAddress(uint8_t downLinkAddress) { // Overwrites the known device address, use for debugging
+      deviceAddress = downLinkAddress;
+    }
+
+  private:
+    uint8_t deviceAddress; // Address of the M-Bus device
+    bool hasRecipe = false; // True if a custom recipe has been created
+    LinkedList<bool> recipe; // Each member is true if the corresponding byte is should be included in the customPackage
+    LinkedList<byte> rawPackage = LinkedList<byte>(); // Last recieved raw M-Bus package
+    LinkedList<byte> customPackage = LinkedList<byte>(); // customPackage of last rawPackage. Uses recipe to create from the rawPackage
+
+    void mbusRequest(uint8_t address) { // Makes M-Bus request with the given device address
+      // Todo, copy the original request function
+    }
+
+    void createPackage(uint8_t address, LinkedList<bool> content, LinkedList<byte> Mbuspackage) { // Makes M-Bus request and filters the desired content based on recipe
+      // Make a request for the raw package
+      mbusRequest(address);
+
+      // Filter the data of the raw package to create the custom package. Uses the given recipe
+      for(uint8_t i = 0; i < recipe.size(); i++) {
+        if (recipe.get(i) == true) {
+          customPackage.add(rawPackage.get(i));
+        }
+      }
+      return;
+    }
+};
+
+// Lists
+bool addressList[250] = {}; // List that holds all found M-Bus addresses. To be removed
+LinkedList<String> dataList = LinkedList<String>(); // Linked list that holds data from M-Bus requests. To be removed
+LinkedList<byte> dataList2 = LinkedList<byte>(); // Linked list that holds data from M-Bus requests. To be removed
+LinkedList<MBusDevice> deviceList; // Linked list that holds objects of the uplink class
+
+// LoRaWAN constant initialization
 LoRaModem modem;
 String appEui = SECRET_APP_EUI;
 String appKey = SECRET_APP_KEY;
@@ -30,14 +111,21 @@ String devAddr;
 String nwkSKey;
 String appSKey;
 int maxPacketSize = 64;
+#define HEARTBEAT 1
+#define MBUS_DEVICE_LIST 2
+#define SET_PACKAGE_TIME 3
+#define UPLINK_CLASS_MEMBERS 4
+#define CUSTOM_PAYLOAD 5
+#define FULL_PAYLOAD 6
 
 int resetPin = 0;
 int err = 0;
 int usedBytes = 0;
 int addressNumber = 0;
+
 time_t unixTime; 
 time_t lastPackageTime;
-
+uint32_t heartbeatInterval;
 uint8_t lastPayloadLength;
 
 void setup() {
@@ -81,79 +169,16 @@ void setup() {
   Serial.println("Scan finished, sending list of devices");
 
   //Send list of M-Bus devices
-  for(uint8_t i = 0; i < addressList.size(); i++) {
-    packet[i] = addressList.get(i);
+  for(uint8_t i = 0; i < deviceList.size(); i++) {
+    packet[i] = deviceList[i].getAddress();
   }
   modem.beginPacket();
   modem.write(packet, sizeof(packet));
   err = modem.endPacket(false);
   Serial.println(err); 
-  modem.
 }
 
-class UpLink {
-  public:
-    void Uplink(uint8_t address) {
-      // Sets the M-Bus-address for the device
-      addressMBus = address;
-      return;
-    }
-
-    LinkedList<byte> makeUplink() {
-      LinkedList<byte> uplink;
-      LinkedList<byte> package;
-      uplink.add(getAddress());
-      package = getPackage();
-      for (uint8_t i ;i < package.size(); i++) {
-        uplink.add(package.get(i));
-      }
-      return uplink;
-    }
-
-    LinkedList<byte> getPackage() {
-      // Return customPackage based on the recipe
-      LinkedList<byte> package;
-      package = createPackage(recipe);
-      return package;
-    }
-
-    uint8_t getAddress() {
-      // Gets the address of the custom uplink
-      return addressMBus;
-    }
-
-    LinkedList<bool> getRecipe() {
-      return recipe;
-    }
-
-    void setRecipe(LinkedList<bool> downlink) {
-      // Creates custom recipe for the given device
-      // Overwrites any old recipe
-      recipe = downlink;
-      return;
-    }
-    
-  private:
-    uint8_t addressMBus; // Address of the M-Bus device
-    LinkedList<bool> recipe; // Each member shows if the corresponding byte is should be included in the customPackage
-
-    LinkedList<byte> createPackage(LinkedList<bool> content) {
-      // Makes M-Bus request and filters the desired content based on recipe
-      // Returns the resulting package
-      LinkedList<byte> rawPackage;
-      LinkedList<byte> package;
-      package = mbusRequest(addressMBus);
-      for (uint8_t i; i < rawPackage.size(); i++) {
-        if (recipe.get(i) = true) {
-          package.add(rawPackage.get(i));
-        }
-      }
-      return package;
-    }
-};
-
-void loraOTAAJoin(String appKey, String appEui) {
-  // Use deviceEUI and fluctuating analog value to generate random seed for random join wait if reset to prevent network congestion.
+void loraOTAAJoin(String appKey, String appEui) { // Use deviceEUI and fluctuating analog value to generate random seed for random join wait if reset to prevent network congestion
   String deviceEUI = modem.deviceEUI();
   uint64_t deviceSeed = 1; 
   for(uint8_t i = 0; i < deviceEUI.length(); i++) {
@@ -192,10 +217,14 @@ void loraOTAAJoin(String appKey, String appEui) {
   return;
 }
 
-void parseDownLink(byte downLinkMessage[64]) {
-  // Parses downlink messages and makes relevant calls 
+void parseDownLink(byte downLinkMessage[64]) { // Parses downlink messages and makes relevant calls 
   uint8_t messageType = downLinkMessage[0];
   
+  /* 
+  Content of downlink message
+  Byte 0 - request type
+  Byte 1 - M-Bus address if relevant
+  */
   switch (messageType)
   {
     case 1: {
@@ -205,13 +234,13 @@ void parseDownLink(byte downLinkMessage[64]) {
     }
     case 2: {
       // Set uplink interval and return the uplink interval as uplink
-      uint32_t uplinkInterval = downLinkMessage[1] + downLinkMessage[2] + downLinkMessage[3] + downLinkMessage[4];
+      uint32_t uplinkInterval = downLinkMessage[1] + downLinkMessage[2] + downLinkMessage[3] + downLinkMessage[4]; // TODO
       uint32_t setInterval = setUplinkInterval(uplinkInterval);
       break;
     }
     case 3: {
       // Get M-bus device addresses and return as list
-      getMBusDevices();
+      getMBusDevices(false);
       break;
     }
     case 4: {
@@ -220,6 +249,8 @@ void parseDownLink(byte downLinkMessage[64]) {
     }
     case 5: {
       // Create or overwrite new uplink recipe
+      // Content: uint8_t address, bool recipeList[]
+
       break;
     }
     case 6: {
@@ -237,7 +268,7 @@ void parseDownLink(byte downLinkMessage[64]) {
   }
 };
 
-void mbusRequest(byte address) { // TODO Needs to change to a returning function. Return the package as a linkedlist of bytes. 
+void mbusRequest(byte address) { // TODO: Needs to change to a returning function. Return the package as a linkedlist of bytes. 
   // Requests an mbus package on the given address
 
   // Reset variables
@@ -263,24 +294,36 @@ void mbusRequest(byte address) { // TODO Needs to change to a returning function
   }
 }
 
-void getMBusDevices(bool scan) {
-  // Scan for M-Bus devices if scan is true
-  // Return list of M-Bus devices
+void getMBusDevices(bool scan) { // Return list of M-Bus devices. Scan for M-Bus devices if scan is true
   if (scan == true) {
     mbus_scan();
   }
   
 }
 
-void createHeartbeat() {
-  //Create a heartbeat message, should be the periodical confirmed Uplink. Downlink should contain Unix time to sync
-  LinkedList<byte> heartbeatPackage;
-
+void setHeartbeatInterval(uint32_t interval) { // Set heartbeat interval. Value in seconds. Minimum value is at 900 seconds
+  if (interval > 900) {
+    heartbeatInterval = interval;
+  }
+  else {
+    heartbeatInterval = 900;
+  }
+  return;
 }
 
-uint32_t setUplinkInterval(uint32_t interval) {
-  // Allows setting a minimum uplink interval
-  // Checks if the chosen value lies within the allowed airtime if not the interval defaults to the lowest allowed value
+LinkedList<byte> createHeartbeat() { // TODO: test. Create a heartbeat message, should be the periodical confirmed Uplink. Resulting downlink should echo the heartbeat number and contain Unix time to sync
+  LinkedList<byte> payload;
+  payload.add(HEARTBEAT);
+  char binaryInterval[4];
+  memcpy(binaryInterval, &heartbeatInterval, sizeof(heartbeatInterval));
+  for (uint8_t i = 0; i > sizeof(binaryInterval); i++) {
+    payload.add(binaryInterval[i]);
+  }
+
+  return payload;
+}
+
+uint32_t setUplinkInterval(uint32_t interval) { // Allows setting a minimum uplink interval. Checks if the chosen value lies within the allowed airtime if not the interval defaults to the lowest allowed value
   uint8_t dataRate = modem.getDataRate();
   uint32_t bandWidth = getBandWidth(dataRate);
   uint8_t spreadingFactor = getSpreadingFactor(dataRate);
@@ -293,8 +336,7 @@ uint32_t setUplinkInterval(uint32_t interval) {
   return interval;
 }
 
-uint8_t getSpreadingFactor(uint8_t dataRate) {
-  // Gets the spreadingfactor value of the given datarate
+uint8_t getSpreadingFactor(uint8_t dataRate) { // Gets the spreadingfactor value of the given datarate
   uint8_t spreadingFactor;
   
   if (dataRate == 6) {
@@ -307,8 +349,7 @@ uint8_t getSpreadingFactor(uint8_t dataRate) {
   return spreadingFactor;
 }
 
-uint32_t getBandWidth(uint8_t dataRate) {
-  // Gets the bandwidth of the given datarate
+uint32_t getBandWidth(uint8_t dataRate) { // Gets the bandwidth of the given datarate
   uint32_t bandWidth;
   if (dataRate == 6) {
     bandWidth = 250000;
@@ -319,8 +360,7 @@ uint32_t getBandWidth(uint8_t dataRate) {
   return bandWidth;
 }
 
-uint8_t getPayloadMaxLength(uint8_t spreadingFactor) {
-  // Returns the maximum payload length in bytes for each spreading factor. 
+uint8_t getPayloadMaxLength(uint8_t spreadingFactor) { // Returns the maximum payload length in bytes for each spreading factor. 
   uint8_t maxPayloadLength;
   switch (spreadingFactor)
   {
@@ -346,9 +386,8 @@ uint8_t getPayloadMaxLength(uint8_t spreadingFactor) {
   return maxPayloadLength;
 }
 
-float getPackageTime(uint8_t spreadingFactor, uint32_t bandwidth, uint8_t payloadLength) {
+float getPackageTime(uint8_t spreadingFactor, uint32_t bandwidth, uint8_t payloadLength) { // Returns the minimum interval between packages of the given specification in ms
   // See this page for formulas https://www.rfwireless-world.com/calculators/LoRaWAN-Airtime-calculator.html
-  // Returns the minimum interval between packages of the given specification in ms
   // Use this value for setting a minimum delay after transmission
   // Duty cycle restrictions are 1% in EU868 band, hence packageTime is packageAirTime * 100
   uint8_t codingRate = 1;
@@ -362,10 +401,9 @@ float getPackageTime(uint8_t spreadingFactor, uint32_t bandwidth, uint8_t payloa
   return packageTime;
 }
 
-void scheduleNextAction() {
+void scheduleNextAction() { // Schedules the next function using Arduino-Timer
   // Todo
-  // Schedules the next function using Arduino-Timer
-  //
+  timer_create_default();
 }
 
 /* uint32_t canSend() {
@@ -387,13 +425,15 @@ void scheduleNextAction() {
   }
 } */
 
-LinkedList<UpLink> getUplinkClassMembers() {
-  //returns a list addresses for devices with custom uplink recipes
-  // What returntype to use???
+LinkedList<uint8_t> getUplinkClassMembers() { // TODO: Returns a list with addresses for devices with custom uplink recipe
+  LinkedList<uint8_t> list = LinkedList<uint8_t>();
+  for (uint8_t i = 0; i < deviceList.size(); i++) {
+    list.add(deviceList.get(i).getAddress()); 
+  }
+  return list; 
 }
 
-void resetArduino() {
-  // Reset the device using the reset pin
+void resetArduino() { // Reset the device using the reset pin
   pinMode(resetPin, OUTPUT);
   delay(200);
   digitalWrite(resetPin, HIGH);
@@ -402,9 +442,8 @@ void resetArduino() {
   digitalWrite(resetPin, LOW);
 }
 
-void rejoin() {
-  // Rejoin the TTS instance. Can be requested from the TTS to give an quick 
-  // Todo
+void rejoin() { // Rejoin the TTS instance. Can be requested from the TTS to ensure the device is reachable without waiting for a heartbeat
+  loraOTAAJoin(appKey, appEui);
 }
 
 void parseCayenne() {

@@ -16,7 +16,7 @@ Further development will enable an application to choose the content of the upli
         <li><s>Set specific interval</s></li>
         <li>Test ADR functionality</li>
     </ul></li>
-    <li>Heartbeat function</li>
+    <li><s>Heartbeat function</s></li>
     <li>Time keeping, time based events</li>
     <li>Local M-Bus parsing<ul>
         <li>Parse to cayenne</li>

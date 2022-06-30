@@ -16,8 +16,8 @@
 int mbus_scan() {
   unsigned long timer_start = 0;
   
-  for (byte address = 1; address <= 250; address++) {
-    for (byte retry=1; retry<=2; retry++) {  
+  for (uint8_t address = 1; address <= 250; address++) {
+    for (uint8_t retry = 0; retry <= 1; retry++) {  
       Serial.print("Scanning address: ");
       Serial.println(address);
       mbus_application_reset(address); //FR
@@ -28,14 +28,13 @@ int mbus_scan() {
           byte val = customSerial->read();
 
           // Collects the found addresses
-          if (customSerial->available() == 0 && addressList.get(addressList.size() - 1) != address){
-            addressList.add(address);
-            int listSize = addressList.size();
-            Serial.print("There are ");
-            Serial.print(listSize);
-            Serial.print(" integers in the list. The last one are: ");
-            Serial.print(addressList.get(addressList.size()-1));
-          } 
+          addressList[address] = true;
+          // Print addresses found 
+          Serial.println("The following addresses have connected M-Bus devices");
+          for (uint8_t i = 0; i < sizeof(addressList); i++) {
+              Serial.println(i);
+            
+          }
         }
       }
     }
