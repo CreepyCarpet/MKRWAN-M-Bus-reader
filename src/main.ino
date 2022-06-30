@@ -1,25 +1,136 @@
 // todo cleanup datalists after binary conversion
+// Todo Linked list as packet list?
+// Todo heartbeat retry logic
+// Todo make LoRa specific functions a child class of LoRaModem to simplify program
 #include <MKRWAN.h>
 #include <HardwareSerial.h>
 #include <LinkedList.h>
 #include <math.h>
 #include <secrets.h>
 #include <arduino-timer.h>
-
 using namespace std;
 
-// M-Bus constant initalization
-#define DEBUG true
-#define MBUS_BAUD_RATE 2400
-#define MBUS_TIMEOUT 1000 // milliseconds
-#define MBUS_DATA_SIZE 255
-#define MBUS_GOOD_FRAME true
-#define MBUS_BAD_FRAME false
-uint8_t MBusSize;
 HardwareSerial *customSerial;
 char packet[64];
 
-class MBusDevice { // Objects of this class are tied to specific M-Bus addresses. Each object can create a custom payload from the M-Bus device based on a given recipe. Recipes can be given via downlinks
+class MBus {
+  public:
+    LinkedList<MBusDevice> devices = LinkedList<MBusDevice>(); // Linked list for all the connected M-Bus-devices 
+
+    void setBaud(uint8_t baudRate) { // Set the baudRate of the serial connection with the M-Bus-devices 
+      /*
+      List of possible baudrates:
+      0 = 300 baud
+      1 = 600 baud
+      2 = 1200 baud
+      3 = 2400 baud
+      4 = 4800 baud
+      5 = 9600 baud
+      6 = 19200 baud
+      7 = 38400 baud
+      */
+
+      switch (baudRate)
+      {
+      case 0:
+        MBUS_BAUD_RATE = 300;
+        break;
+      
+      case 1:
+        MBUS_BAUD_RATE = 600;
+        break;
+      
+      case 2:
+        MBUS_BAUD_RATE = 1200;
+        break;
+      
+      case 3:
+        MBUS_BAUD_RATE = 2400;
+        break;
+      
+      case 4:
+        MBUS_BAUD_RATE = 4800;
+        break;
+      
+      case 5:
+        MBUS_BAUD_RATE = 9600;
+        break;
+      
+      case 6:
+        MBUS_BAUD_RATE = 19200;
+        break;
+      
+      case 7:
+        MBUS_BAUD_RATE = 38400;
+        break;
+      
+      default:
+        break;
+      }
+      return;
+    }
+
+    void setTimeout(uint16_t timeOut) { // Set the timeout on the serial connection with the -Bus-devices. Suggested value is 1000 ms
+      MBUS_TIMEOUT = timeOut;
+      return;
+    }
+
+    void setDataSize(uint8_t size) { // Set the maximum datasize of the M-Bus-payloads. Usually set to 256 bytes
+      MBUS_DATA_SIZE = size;
+      return;
+    }
+
+    uint32_t getBaudRate() { // Get the baudRate of the serial connection with the M-Bus-devices
+      return MBUS_BAUD_RATE;
+    }
+
+    uint16_t getTimeOut() { // Get the timeout of the serial connection with the M-Bus-devices
+      return MBUS_TIMEOUT;
+    }
+
+    uint8_t getDataSize() { // Get the maximum datasize of the M-Bus-payloads
+      return MBUS_TIMEOUT;
+    }
+
+    LinkedList<uint8_t> getAddressList() { // Return list of known M-Bus-devices
+      return addressList;
+    }
+
+    void mbusScan() { // Scan for M-bus-devices and put found addresses into addressList
+      unsigned long timer_start = 0;
+      for (uint8_t address = 1; address <= 250; address++) {
+        for (uint8_t retry = 0; retry <= 1; retry++) {  
+          Serial.print("Scanning address: ");
+          Serial.println(address);
+          mbus_application_reset(address);
+          timer_start = millis();
+          while (millis()-timer_start<256) {
+            if (customSerial->available()) {
+              byte val = customSerial->read();
+              addressList.add(address);
+              devices.add(address);
+            }
+            // Print the connected addresses
+            Serial.println("The following addresses have connected M-Bus devices:");
+            for (uint8_t i = 0; i < sizeof(devices); i++) {
+                Serial.println(devices.get(i).getAddress());
+            }
+          }
+        }
+      }
+    return;
+    }
+
+  private:
+    bool DEBUG = true;
+    uint32_t MBUS_BAUD_RATE = 2400;
+    uint16_t MBUS_TIMEOUT = 1000; // milliseconds
+    uint8_t MBUS_DATA_SIZE = 255;
+
+    LinkedList<uint8_t> addressList = LinkedList<uint8_t>(); // Linked list for all the connected M-Bus-devices 
+};
+
+class MBusDevice { // Objects of this class are tied to specific M-Bus addresses. Each object can create a custom payload from the M-Bus-device based on a given recipe. Recipes can be given via downlinks
   public:
     MBusDevice(uint8_t address) { // Constructor
       // Sets the M-Bus-address for the device
@@ -27,7 +138,7 @@ class MBusDevice { // Objects of this class are tied to specific M-Bus addresses
       return;
     }
 
-    LinkedList<byte> getRawPackage() { // Get a full, raw M-Bus package
+    LinkedList<byte> getRawPackage() { // Get a full, raw M-Bus-package
       // Todo
       mbusRequest(deviceAddress);
       LinkedList<byte> package = rawPackage;
@@ -79,10 +190,6 @@ class MBusDevice { // Objects of this class are tied to specific M-Bus addresses
     LinkedList<byte> rawPackage = LinkedList<byte>(); // Last recieved raw M-Bus package
     LinkedList<byte> customPackage = LinkedList<byte>(); // customPackage of last rawPackage. Uses recipe to create from the rawPackage
 
-    void mbusRequest(uint8_t address) { // Makes M-Bus request with the given device address
-      // Todo, copy the original request function
-    }
-
     void createPackage(uint8_t address, LinkedList<bool> content, LinkedList<byte> Mbuspackage) { // Makes M-Bus request and filters the desired content based on recipe
       // Make a request for the raw package
       mbusRequest(address);
@@ -95,13 +202,29 @@ class MBusDevice { // Objects of this class are tied to specific M-Bus addresses
       }
       return;
     }
+
+    void mbusRequest(uint8_t address) { // Request a M-Bus-telegram for this device. Saves the content of the request in rawPackage. 
+      bool frameResult;
+      byte mbusData[mbus.getDataSize()] = {0};
+      
+      mbus_request_data(address);
+      frameResult = mbus_get_response(mbusData, sizeof(mbusData));
+      
+      if (frameResult) {
+        Serial.println(F("mbus: good frame: "));
+      }
+      else {
+        Serial.println(F("mbus: bad frame: "));
+      }
+
+      for (int i = 0;i < dataList2.size(); i++) {
+        Serial.print(dataList2.get(i));
+      }
+      return;
+    }
 };
 
-// Lists
-bool addressList[250] = {}; // List that holds all found M-Bus addresses. To be removed
-LinkedList<String> dataList = LinkedList<String>(); // Linked list that holds data from M-Bus requests. To be removed
-LinkedList<byte> dataList2 = LinkedList<byte>(); // Linked list that holds data from M-Bus requests. To be removed
-LinkedList<MBusDevice> deviceList; // Linked list that holds objects of the uplink class
+MBus mbus;
 
 // LoRaWAN constant initialization
 LoRaModem modem;
@@ -163,14 +286,14 @@ void setup() {
 
   //M-Bus serial initialization
   customSerial = &Serial1;
-  customSerial->begin(MBUS_BAUD_RATE, SERIAL_8E1); // mbus uses 8E1 encoding
+  customSerial->begin(mbus.getBaudRate(), SERIAL_8E1); // mbus uses 8E1 encoding
   delay(5000); // Delay to startup. Let the serial initialize, or we get a bad first frame
   mbus_scan(); // First scan to get addresses
   Serial.println("Scan finished, sending list of devices");
 
   //Send list of M-Bus devices
-  for(uint8_t i = 0; i < deviceList.size(); i++) {
-    packet[i] = deviceList[i].getAddress();
+  for(uint8_t i = 0; i < mbus.devices.size(); i++) {
+    packet[i] = mbus.devices[i].getAddress();
   }
   modem.beginPacket();
   modem.write(packet, sizeof(packet));
@@ -240,7 +363,6 @@ void parseDownLink(byte downLinkMessage[64]) { // Parses downlink messages and m
     }
     case 3: {
       // Get M-bus device addresses and return as list
-      getMBusDevices(false);
       break;
     }
     case 4: {
@@ -268,7 +390,7 @@ void parseDownLink(byte downLinkMessage[64]) { // Parses downlink messages and m
   }
 };
 
-void mbusRequest(byte address) { // TODO: Needs to change to a returning function. Return the package as a linkedlist of bytes. 
+void mbusRequest(byte address) { // TODO: Return the package as a linkedlist of bytes. Test how responses are returned 
   // Requests an mbus package on the given address
 
   // Reset variables
@@ -292,13 +414,6 @@ void mbusRequest(byte address) { // TODO: Needs to change to a returning functio
   for (int i = 0;i < dataList2.size(); i++) {
     Serial.print(dataList2.get(i));
   }
-}
-
-void getMBusDevices(bool scan) { // Return list of M-Bus devices. Scan for M-Bus devices if scan is true
-  if (scan == true) {
-    mbus_scan();
-  }
-  
 }
 
 void setHeartbeatInterval(uint32_t interval) { // Set heartbeat interval. Value in seconds. Minimum value is at 900 seconds
@@ -442,7 +557,7 @@ void resetArduino() { // Reset the device using the reset pin
   digitalWrite(resetPin, LOW);
 }
 
-void rejoin() { // Rejoin the TTS instance. Can be requested from the TTS to ensure the device is reachable without waiting for a heartbeat
+void reJoin() { // Rejoin the TTS instance. Can be requested from the TTS to ensure the device is reachable without waiting for a heartbeat
   loraOTAAJoin(appKey, appEui);
 }
 

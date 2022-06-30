@@ -1,7 +1,5 @@
 #include <HardwareSerial.h>
-#include <LinkedList.h> // FR
-
-//LinkedList<int> myList = LinkedList<int>(); // FR
+#include <LinkedList.h>
 
 #define MBUS_FRAME_SHORT_START          0x10
 #define MBUS_FRAME_LONG_START           0x68
@@ -12,35 +10,6 @@
 #define MBUS_ADDRESS_NETWORK_LAYER      0xFE
 
 #define MBUS_ACK                        0xE5 (229)
-
-int mbus_scan() {
-  unsigned long timer_start = 0;
-  
-  for (uint8_t address = 1; address <= 250; address++) {
-    for (uint8_t retry = 0; retry <= 1; retry++) {  
-      Serial.print("Scanning address: ");
-      Serial.println(address);
-      mbus_application_reset(address); //FR
-      //mbus_normalize(address);  //FR
-      timer_start = millis();
-      while (millis()-timer_start<256) {
-        if (customSerial->available()) {
-          byte val = customSerial->read();
-
-          // Collects the found addresses
-          addressList[address] = true;
-          // Print addresses found 
-          Serial.println("The following addresses have connected M-Bus devices");
-          for (uint8_t i = 0; i < sizeof(addressList); i++) {
-              Serial.println(i);
-            
-          }
-        }
-      }
-    }
-  }
-  return -1;
-}
 
 // ---------------------------------------------------------------
 

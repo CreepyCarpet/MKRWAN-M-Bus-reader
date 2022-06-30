@@ -1,7 +1,7 @@
 <h1>LoRaWAN enabled M-Bus-reader firmware for the Arduino MKRWAN 1310</h1>
 
 Attempts to OTAA-join the connected TTS instance on power-on. Scans M-Bus addresses for devices and sends full M-Bus telegrams binary-encoded at chosen interval.  
-Further development will enable an application to choose the content of the uplink packages. Package interval should also be automatically updated based on spreading factor. 
+Further development will enable an application to choose the content of the uplink packages. Package interval should also be automatically updated based on spreading factor and requested intervals.  
 
 <h2>MKRWAN 1310 pinout</h2>
 <img title="MKRWAN 1310 pinout" alt="MKRWAN 1310 pinout" src="./ABX00029-pinout.png">
