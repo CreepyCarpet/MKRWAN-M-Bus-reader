@@ -1,19 +1,22 @@
-// todo cleanup datalists after binary conversion
-// Todo Linked list as packet list?
 // Todo heartbeat retry logic
-// Todo make LoRa specific functions a child class of LoRaModem to simplify program
+// Todo Enable variable downlink length
+// Todo Event scheduler with timed priority
+// Todo ADR handling, check downlinks for ADR req and comply with the req
+
 #include <MKRWAN.h>
 #include <HardwareSerial.h>
 #include <LinkedList.h>
 #include <math.h>
 #include <secrets.h>
 #include <arduino-timer.h>
+#include <TimeLib.h>
 using namespace std;
 
 HardwareSerial *customSerial;
-char packet[64];
+time_t timeNow = now();
+time_t lastSync;
 
-class MBus {
+class MBus { // Class for the M-Bus connection
   public:
     LinkedList<MBusDevice> devices = LinkedList<MBusDevice>(); // Linked list for all the connected M-Bus-devices 
 
@@ -70,7 +73,7 @@ class MBus {
       return;
     }
 
-    void setTimeout(uint16_t timeOut) { // Set the timeout on the serial connection with the -Bus-devices. Suggested value is 1000 ms
+    void setTimeout(uint16_t timeOut) { // Set the timeout on the serial connection with the M-Bus-devices. Suggested value is 1000 ms
       MBUS_TIMEOUT = timeOut;
       return;
     }
@@ -96,8 +99,11 @@ class MBus {
       return addressList;
     }
 
-    void mbusScan() { // Scan for M-bus-devices and put found addresses into addressList
+    void scan() { // Scan for M-bus-devices and put found addresses into addressList. Clears addresslist and known devices INCLUDING SAVED RECIPIES 
+      addressList.clear(); // clears known address list
+      devices.clear(); //clears known device list
       unsigned long timer_start = 0;
+      // Scans all M-Bus addresses for connected M-Bus-devices
       for (uint8_t address = 1; address <= 250; address++) {
         for (uint8_t retry = 0; retry <= 1; retry++) {  
           Serial.print("Scanning address: ");
@@ -111,7 +117,7 @@ class MBus {
               devices.add(address);
             }
             // Print the connected addresses
-            Serial.println("The following addresses have connected M-Bus devices:");
+            Serial.println("The following addresses are in use by M-Bus devices:");
             for (uint8_t i = 0; i < sizeof(devices); i++) {
                 Serial.println(devices.get(i).getAddress());
             }
@@ -132,21 +138,22 @@ class MBus {
 
 class MBusDevice { // Objects of this class are tied to specific M-Bus addresses. Each object can create a custom payload from the M-Bus-device based on a given recipe. Recipes can be given via downlinks
   public:
+    bool hasRecipe; // True if a custom recipe has been created
+    
     MBusDevice(uint8_t address) { // Constructor
       // Sets the M-Bus-address for the device
       deviceAddress = address;
+      hasRecipe = false;
       return;
     }
 
     LinkedList<byte> getRawPackage() { // Get a full, raw M-Bus-package
-      // Todo
       mbusRequest(deviceAddress);
-      LinkedList<byte> package = rawPackage;
-      return package;
+      return rawPackage;
     }
 
     LinkedList<byte> getPackage() { // Make request and then return customPackage based on the recipe
-      createPackage(deviceAddress, recipe, rawPackage);
+      createPackage(deviceAddress, recipe);
       return customPackage;
     }
 
@@ -179,19 +186,29 @@ class MBusDevice { // Objects of this class are tied to specific M-Bus addresses
       return;
     }
 
+    void setSendCustomUplinks(bool setting) { // If set to false device will send no custom uplinks
+      if (hasRecipe == true) {
+        sendCustomUplinks = setting;
+      }
+      else {
+        Serial.println("Device has no recipe, cannot create custom uplinks");
+      }
+      return;
+    }
+
     void setAddress(uint8_t downLinkAddress) { // Overwrites the known device address, use for debugging
       deviceAddress = downLinkAddress;
     }
 
   private:
     uint8_t deviceAddress; // Address of the M-Bus device
-    bool hasRecipe = false; // True if a custom recipe has been created
+    bool sendCustomUplinks; // Sends custom uplinks at given interval if true
     LinkedList<bool> recipe; // Each member is true if the corresponding byte is should be included in the customPackage
     LinkedList<byte> rawPackage = LinkedList<byte>(); // Last recieved raw M-Bus package
     LinkedList<byte> customPackage = LinkedList<byte>(); // customPackage of last rawPackage. Uses recipe to create from the rawPackage
 
-    void createPackage(uint8_t address, LinkedList<bool> content, LinkedList<byte> Mbuspackage) { // Makes M-Bus request and filters the desired content based on recipe
-      // Make a request for the raw package
+    void createPackage(uint8_t address, LinkedList<bool> content) { // Makes M-Bus request and filters the desired content based on recipe
+      // Make a request for a fresh mbus telegram
       mbusRequest(address);
 
       // Filter the data of the raw package to create the custom package. Uses the given recipe
@@ -205,7 +222,7 @@ class MBusDevice { // Objects of this class are tied to specific M-Bus addresses
 
     void mbusRequest(uint8_t address) { // Request a M-Bus-telegram for this device. Saves the content of the request in rawPackage. 
       bool frameResult;
-      byte mbusData[mbus.getDataSize()] = {0};
+      byte mbusData[mbus.getDataSize()] = {0}; // Todo fix
       
       mbus_request_data(address);
       frameResult = mbus_get_response(mbusData, sizeof(mbusData));
@@ -217,67 +234,464 @@ class MBusDevice { // Objects of this class are tied to specific M-Bus addresses
         Serial.println(F("mbus: bad frame: "));
       }
 
-      for (int i = 0;i < dataList2.size(); i++) {
-        Serial.print(dataList2.get(i));
+      // Copy bytes to local LinkedList using get_bytes function 
+      rawPackage = get_bytes(mbusData, sizeof(mbusData));
+      for (uint8_t i = 0; i < rawPackage.size(); i++) {
+        Serial.print(rawPackage.get(i));
       }
       return;
     }
 };
 
-MBus mbus;
+class LoRaWAN: public LoRaModem { // Child class of LoRaModem with additional functions. Everything LoRaWAN linked belongs in this class
+  public:
+    void randomOTAAJoin(String appKey, String appEui) { // Use deviceEUI and fluctuating analog value to generate random seed for random join wait if reset to prevent network congestion
+      String deviceEUI = modem.deviceEUI();
+      
+      // Make deviceseed from deviceEUI
+      uint64_t deviceSeed = 1; 
+      for(uint8_t i = 0; i < deviceEUI.length(); i++) {
+        char thisChar = deviceEUI.charAt(i);
+        for(int j = 0; j < 8; j++) {
+          byte bit = bitRead(thisChar, j);
+          if (bit == true) {
+            deviceSeed = deviceSeed*2;
+          }
+        }
+      }
+      Serial.println("deviceSeed is:");
+      Serial.println(deviceSeed);
+
+      // Combine analogRead with deviceseed to get a pseudo random seed 
+      randomSeed(deviceSeed + analogRead(0));
+      
+      // Generate random wait time seeded with random seed
+      uint32_t randomInt = random(120);
+      for (uint32_t i = 0; i < randomInt; i++) {
+        delay(1000);
+        Serial.print(".");
+      }
+
+      // Attempt OTAA connection
+      bool connected = modem.joinOTAA(appEui, appKey);
+
+      if (!connected) {
+        Serial.println("Something went wrong; are you indoor? Move near a window and retry");
+        while (randomInt < 3600) {
+          randomInt = randomInt*2;
+          for (uint32_t i = 0; i < randomInt; i++) {
+            delay(1000);
+            Serial.print(".");
+          }
+          connected = modem.joinOTAA(appEui, appKey);
+        }
+      }
+      return;
+    }
+
+    uint8_t getSpreadingFactor() { // Returns the spreadingfactor value of the given datarate
+      uint8_t dataRate = getDataRate();
+      uint8_t spreadingFactor;
+      
+      if (dataRate == 6) {
+        spreadingFactor = 7;
+      }
+      else {
+        uint8_t spreadingFactor = 12 - dataRate;
+      }
+      Serial.println(spreadingFactor);
+      return spreadingFactor;
+    }
+
+    uint32_t getBandWidth() { // Returns the bandwidth of the given datarate
+      uint8_t dataRate = getDataRate();
+      uint32_t bandWidth;
+      if (dataRate == 6) {
+        bandWidth = 250000;
+      }
+      else {
+        bandWidth = 125000;
+      }
+      return bandWidth;
+    }
+
+    uint8_t getPayloadMaxLength() { // Returns the maximum payload length in bytes for each spreading factor. 
+      uint8_t spreadingFactor = getSpreadingFactor();
+      uint8_t maxPayloadLength;
+      switch (spreadingFactor)
+      {
+      case 7:
+        maxPayloadLength = 222;  
+        break;
+      case 8:
+        maxPayloadLength = 222;  
+        break;
+      case 9:
+        maxPayloadLength = 115;  
+        break;
+      case 10:
+        maxPayloadLength = 51;  
+        break;
+      case 11:
+        maxPayloadLength = 51;  
+        break;
+      case 12:
+        maxPayloadLength = 51;
+        break;
+      }
+      return maxPayloadLength;
+    }
+
+    uint32_t getPackageTime(uint8_t payloadLength) { // Returns the minimum interval between packages of the given specification in ms
+      // See this page for formulas https://www.rfwireless-world.com/calculators/LoRaWAN-Airtime-calculator.html
+      // Use this value for setting a minimum delay after transmission
+      // Duty cycle restrictions are 1% in EU868 band, hence packageTime is packageAirTime * 100
+      uint8_t spreadingFactor = getSpreadingFactor();
+      uint32_t bandwidth = getBandWidth();
+
+      uint8_t codingRate = 1;
+      uint8_t preableSymb = 8;
+      uint16_t payloadSymb = 8 + ((8 * payloadLength - 4 * spreadingFactor + 28 + 16) / (4 * spreadingFactor)) * (codingRate + 4);
+      uint16_t packageSymb = preableSymb + payloadSymb;
+      float timeSymb = pow(2, spreadingFactor) / (bandwidth/1000);
+      float packageAirTime = packageSymb * timeSymb;
+      float packageTime = packageAirTime * 100;
+      // Cast float to uint32_t to signify package time in ms
+      uint32_t packageTimeInt = int(packageTime) + 1;
+      Serial.println(packageTime);
+      return packageTimeInt;
+    }
+    
+    void setNextPayload(LinkedList<byte> payload, uint8_t port) { // Set the content and port of the next payload.
+      nextPayload = payload;
+      nextPort = port;
+      return;
+    }
+
+    uint8_t canSend() { // Todo, check if works. Checks the time until next allowed uplink, returns 0 if uplink is allowed
+      uint8_t timeLeft; 
+      uint32_t timeDiff = timeNow - lastUplink;
+      if (timeDiff > lastPackageTime) {
+        timeLeft = 0;
+      }
+      else {
+        timeLeft = lastPackageTime - timeDiff;
+      }
+      return timeLeft;
+    }
+
+    void orderUplink(LinkedList<byte> payload, uint8_t port) { // Make uplink ASAP, checks the next available timeslot, prepares necessary variables and then waits if needed
+      nextPort = port;
+      nextPayload = payload;
+      uint8_t waitTime = canSend();
+      sleep(waitTime*1000);
+      sendPayload();
+    }
+
+    uint8_t getDownlinkQueueLength() { // Returns the length of the downlink queue
+      return downlinkQueue.size();
+    }
+
+    LinkedList<byte> getDownlink() { // Return oldest downlink from queue
+      return downlinkQueue.shift();
+    } 
+
+  private:
+    time_t lastUplink;
+    uint32_t lastPackageTime; // Duty cycle time used by last payload in ms;
+    LinkedList<byte> nextPayload = LinkedList<byte>(); // Content of the next scheduled payload
+    uint8_t nextPort; // Port of the next scheduled package
+    uint8_t offsetPort = 10; // Offset to add to port number to signify that packet is a part of a multipacket payload
+    LinkedList<LinkedList<byte>> downlinkQueue = LinkedList<LinkedList<byte>>(); // Downlinks that are yet to be processed
+
+    void sendPayload() { // Sends the scheduled payload. Calls recursively if payload is longer than the max length for a single packet. Saves downlinks in downlinkQueue
+      beginPacket();
+      // Add offset to port to keep track of package number
+      nextPort = nextPort + offsetPort;
+      // If the payload is larger than the maximum allowed for the given spreading factor split the packet up and send as multiple. 
+      if (nextPayload.size() > getPayloadMaxLength()) {
+        // Fill actual package to maximum length and delete the moved members
+        for (uint8_t i = 0; i < getPayloadMaxLength(); i++) {
+          write(nextPayload.shift());
+        }
+        setPort(nextPort);
+        // Add airtime to lastPackageTime
+        lastPackageTime = lastPackageTime + getPackageTime(getPayloadMaxLength());
+        // Send packet
+        endPacket();
+        // Wait for potential downlink
+        sleep(1000);
+        // Check if there is a downlink
+        if (available()) {
+          // Parse the payload and add it to downlinkQueue
+          downlinkQueue.add(readDownlink());
+        }
+        // Calls recursively to finish the remaining parts of the payload
+        sendPayload();
+      }
+
+      // Last/single packet with payload
+      else {
+        // Fill packet with payload
+        for (uint8_t i = 0; i < nextPayload.size(); i++) {
+          write(nextPayload.shift());
+        }
+        // Set the port to show that packet is last/single packet
+        setPort(nextPort);
+        // Add airtime to lastPackageTime
+        lastPackageTime = lastPackageTime + getPackageTime(nextPayload.size());
+        // Send packet
+        endPacket();
+        // Take timestamp for lastUplink
+        lastUplink = timeNow;
+        // Wait for potential downlink
+        sleep(1000);
+        // Check if there is a downlink
+        if (available()) {
+          // Parse the payload and add it to downlinkQueue
+          downlinkQueue.add(readDownlink());
+        }
+        return;
+      }
+    }
+    
+    LinkedList<byte> readDownlink() { // Reads content of a downlink and returns it as a LinkedList<byte>
+      LinkedList<byte> downlink = LinkedList<byte>();
+      parsePacket();
+      while(available()) {
+        downlink.add(read()); 
+      }
+      return downlink;
+    }
+
+};
+
+class Scheduler { // Handles event scheduling.
+  /* 
+  Event scheduling hierachy:
+  1.  Downlink responses
+  2.  Heartbeats
+  3.  Custom uplinks
+  */
+  public:
+    MBus mbus;
+    LoRaWAN lora;
+
+    uint16_t setDeviceUplinkInterval(uint8_t device, uint16_t interval) { // Sets the uplink interval for a specific device, checks are in place to only allow valid interval settings. If no interval is configured for a device a new configuration will be saved. 
+      uint16_t minimumInterval = 0;
+      uint16_t returnValue = 0; // The highest of either interval or minimum interval
+      // Check known devices for address
+      for (uint8_t i =0; i < mbus.devices.size(); i++) {
+        if (mbus.devices.get(i).getAddress() == device) {
+          if (mbus.devices.get(i).hasRecipe == true) { // Check if the device has a custom recipe
+            uint8_t payloadLength = mbus.devices.get(i).getRecipe().size();
+            // Calculate total package time based on recipe given. 
+            if (payloadLength > lora.getPayloadMaxLength()) {
+              // recipe longer than single packet, calculating combined interval time
+              while (payloadLength > lora.getPayloadMaxLength()) {
+                minimumInterval = minimumInterval + lora.getPackageTime(lora.getPayloadMaxLength()); 
+                payloadLength = payloadLength - lora.getPayloadMaxLength();
+              }
+              minimumInterval = minimumInterval + lora.getPackageTime(payloadLength);
+            } 
+            else {
+              minimumInterval = lora.getPackageTime(payloadLength);
+            }
+            for (uint8_t i = 0; i < deviceSchedules.size(); i++) {
+              // Check if device already has schedule. Delete and recreate if it does
+              if (deviceSchedules.get(i).address == device) {
+                deviceSchedules.remove(i);
+              }
+            }
+            // Creating new schedule for device
+            deviceSchedule newSched;
+            newSched.address = device;
+            if (minimumInterval > interval) {
+                  newSched.interval = minimumInterval;
+                  newSched.requestedInterval = interval;
+                  returnValue = minimumInterval;
+                }
+                else {
+                  newSched.interval = interval;
+                  newSched.requestedInterval = interval;
+                  returnValue = interval;
+                }
+            deviceSchedules.add(newSched);
+            return returnValue;
+          }
+        }
+        return returnValue;
+      } 
+    }
+
+  private:
+    struct deviceSchedule { // M-Bus-device schedule struct 
+      uint8_t address;
+      uint16_t requestedInterval;
+      uint16_t interval;
+      time_t lastUplink = timeNow;
+    };
+    LinkedList<deviceSchedule> deviceSchedules = LinkedList<deviceSchedule>(); // List of M-Bus-devices with scheduled custom uplinks
+    struct heartBeat {
+      uint32_t interval;
+      time_t lastBeat;
+      uint16_t beatNumber;
+    };
+
+    void parseDownLink() { // Parse downlink message
+      LinkedList<byte> downlink = lora.getDownlink();
+      uint8_t messageType = downlink.get(0);
+
+      switch (messageType) {
+        case 1: { // Reset device
+          pinMode(resetPin, OUTPUT);
+          delay(200);
+          digitalWrite(resetPin, HIGH);
+          Serial.println("Resetting device");
+          delay(2000);
+          digitalWrite(resetPin, LOW);
+          break;
+        }
+
+        case 2: { // Force rejoin
+          lora.randomOTAAJoin(appKey, appEui);
+          break;
+        }
+
+        case 3: { // Get M-Bus device list
+          lora.orderUplink(mbus.getAddressList(), 3);
+          break;
+        }
+
+        case 4: { // Get raw M-Bus payload
+          // Get M-Bus-address from the downlink request
+          uint8_t address = downlink.get(1);
+
+          for (uint8_t i = 0; i < mbus.getAddressList().size(); i++) {
+            if (address == mbus.devices.get(i).getAddress()) {
+              lora.orderUplink(mbus.devices.get(i).getRawPackage(), 4);
+            }
+          }
+          break;
+        }
+
+        case 5: { // Get custom M-Bus payload
+          uint8_t address = downlink.get(1);
+
+          for (uint8_t i = 0; i < mbus.getAddressList().size(); i++) {
+            if (address == mbus.devices.get(i).getAddress()) {
+              lora.orderUplink(mbus.devices.get(i).getPackage(), 5);
+            }
+          }
+          break;
+        }
+
+        case 6: { // Create custom M-Bus recipe
+          uint8_t address = downlink.get(1);
+          
+          // Todo breakdown the downlink package into recipe
+          LinkedList<bool> recipe;
+          for (uint8_t i = 0; i < mbus.getAddressList().size(); i++) {
+            if (address == mbus.devices.get(i).getAddress()) {
+              mbus.devices.get(i).setRecipe(recipe);
+              lora.orderUplink(mbus.devices.get(i).getPackage(), 5);
+            }
+          }
+          break;
+        }
+
+        case 7: { // Remove custom M-Bus recipe
+          uint8_t address = downlink.get(1);
+
+          for (uint8_t i = 0; i < mbus.getAddressList().size(); i++) {
+            if (address == mbus.devices.get(i).getAddress()) {
+              mbus.devices.get(i).removeRecipe();
+              // Todo, create ack
+            }
+          }
+          break;
+        }
+
+        case 8: { // Set custom M-Bus payload uplink interval 
+          uint8_t address = downlink.get(1);
+          // Todo combine bytes to valid interval value. Check if this works
+          uint16_t interval = 256*downlink.get(2) + downlink.get(3);
+          uint16_t setInterval = setDeviceUplinkInterval(address, interval);
+          if (setInterval != 0) { // If setting interval was successful then return the set value
+            LinkedList<byte> payload = LinkedList<byte>();
+            // Todo split up the interval correctly for the payload
+            payload.add(setInterval);
+            lora.orderUplink(payload, 8);
+          } 
+          break;
+        }
+
+        case 9: { // Heartbeat ACK
+          // Todo extract time from heartbeat ACK to ackTime and set the time
+          time_t ackTime;
+          setTime(ackTime);
+          lastSync = ackTime;
+          break;
+        }
+        
+        default: {
+
+          break;
+        }  
+      }
+      return;
+    };
+
+    uint32_t checkHeartbeat() { // Check the time until next heartbeat
+      uint32_t time;
+
+      return time; 
+    }
+
+  };
+
+Scheduler schedule;
 
 // LoRaWAN constant initialization
-LoRaModem modem;
 String appEui = SECRET_APP_EUI;
 String appKey = SECRET_APP_KEY;
 String devAddr;
 String nwkSKey;
 String appSKey;
-int maxPacketSize = 64;
-#define HEARTBEAT 1
-#define MBUS_DEVICE_LIST 2
-#define SET_PACKAGE_TIME 3
-#define UPLINK_CLASS_MEMBERS 4
-#define CUSTOM_PAYLOAD 5
-#define FULL_PAYLOAD 6
 
 int resetPin = 0;
 int err = 0;
 int usedBytes = 0;
 int addressNumber = 0;
 
-time_t unixTime; 
-time_t lastPackageTime;
-uint32_t heartbeatInterval;
-uint8_t lastPayloadLength;
 
 void setup() {
   //Lora OTAA connection
   Serial.begin(115200);
 
-  if (!modem.begin(EU868)) {
+  if (!schedule.lora.begin(EU868)) {
     Serial.println("Failed to start module");
     while (1) {}
   };
 
   Serial.print("Your device EUI is: ");
-  Serial.println(modem.deviceEUI());
+  Serial.println(schedule.lora.deviceEUI());
   
   //Test area
   delay(5000);
 
   // Wait random time, then try to join
-  loraOTAAJoin(appKey, appEui);
+  schedule.lora.randomOTAAJoin(appKey, appEui);
 
-  modem.setADR(true);
+  schedule.lora.setADR(true);
 
-  modem.beginPacket();
+  schedule.lora.beginPacket();
   int err;
   // Print into data packet
-  modem.print("Hi");
+  schedule.lora.print("Hi");
 
   // Send data packet
-  err = modem.endPacket(true);
+  err = schedule.lora.endPacket(true);
   if (err > 0) {
     Serial.println("Message sent correctly!");
   } else {
@@ -286,343 +700,14 @@ void setup() {
 
   //M-Bus serial initialization
   customSerial = &Serial1;
-  customSerial->begin(mbus.getBaudRate(), SERIAL_8E1); // mbus uses 8E1 encoding
+  customSerial->begin(schedule.mbus.getBaudRate(), SERIAL_8E1); // mbus uses 8E1 encoding
   delay(5000); // Delay to startup. Let the serial initialize, or we get a bad first frame
-  mbus_scan(); // First scan to get addresses
+  schedule.mbus.scan(); // First scan to get addresses
   Serial.println("Scan finished, sending list of devices");
 
-  //Send list of M-Bus devices
-  for(uint8_t i = 0; i < mbus.devices.size(); i++) {
-    packet[i] = mbus.devices[i].getAddress();
-  }
-  modem.beginPacket();
-  modem.write(packet, sizeof(packet));
-  err = modem.endPacket(false);
-  Serial.println(err); 
-}
-
-void loraOTAAJoin(String appKey, String appEui) { // Use deviceEUI and fluctuating analog value to generate random seed for random join wait if reset to prevent network congestion
-  String deviceEUI = modem.deviceEUI();
-  uint64_t deviceSeed = 1; 
-  for(uint8_t i = 0; i < deviceEUI.length(); i++) {
-    char thisChar = deviceEUI.charAt(i);
-
-    for(int j = 0; j < 8; j++) {
-      byte bit = bitRead(thisChar, j);
-      if (bit == true) {
-        deviceSeed = deviceSeed*2;
-      }
-    }
-  }
-  Serial.println("deviceSeed is:");
-  Serial.println(deviceSeed);
-  randomSeed(deviceSeed + analogRead(0));
-  uint32_t randomInt = random(120);
-  for (uint32_t i = 0; i < randomInt; i++) {
-    delay(1000);
-    Serial.print(".");
-  }
-
-  // Attempt OTAA connection
-  bool connected = modem.joinOTAA(appEui, appKey);
-
-  if (!connected) {
-    Serial.println("Something went wrong; are you indoor? Move near a window and retry");
-    while (randomInt < 3600) {
-      randomInt = randomInt*2;
-      for (uint32_t i = 0; i < randomInt; i++) {
-        delay(1000);
-        Serial.print(".");
-      }
-      connected = modem.joinOTAA(appEui, appKey);
-    }
-  }
-  return;
-}
-
-void parseDownLink(byte downLinkMessage[64]) { // Parses downlink messages and makes relevant calls 
-  uint8_t messageType = downLinkMessage[0];
   
-  /* 
-  Content of downlink message
-  Byte 0 - request type
-  Byte 1 - M-Bus address if relevant
-  */
-  switch (messageType)
-  {
-    case 1: {
-      // reset the device
-      resetArduino();
-      break;
-    }
-    case 2: {
-      // Set uplink interval and return the uplink interval as uplink
-      uint32_t uplinkInterval = downLinkMessage[1] + downLinkMessage[2] + downLinkMessage[3] + downLinkMessage[4]; // TODO
-      uint32_t setInterval = setUplinkInterval(uplinkInterval);
-      break;
-    }
-    case 3: {
-      // Get M-bus device addresses and return as list
-      break;
-    }
-    case 4: {
-      // Get full M-Bus package from specific device
-      break;
-    }
-    case 5: {
-      // Create or overwrite new uplink recipe
-      // Content: uint8_t address, bool recipeList[]
-
-      break;
-    }
-    case 6: {
-      // Delete uplink recipe
-      break;
-    }
-    case 7: {
-      // Get list of uplink class members
-      break;
-    }
-    default: {
-
-      break;
-    }  
-  }
-};
-
-void mbusRequest(byte address) { // TODO: Return the package as a linkedlist of bytes. Test how responses are returned 
-  // Requests an mbus package on the given address
-
-  // Reset variables
-  bool mbus_good_frame = false;
-  byte mbus_data[MBUS_DATA_SIZE] = { 0 };
-  
-  // Request and check that frame is valid
-  mbus_request_data(address);
-  mbus_good_frame = mbus_get_response(mbus_data, sizeof(mbus_data));
-
-  if (mbus_good_frame) {
-    Serial.println(F("mbus: good frame: "));
-    // Clears dataList, Prints data and enters it in dataList
-    MBusSize = print_bytes(mbus_data, sizeof(mbus_data));
-
-  }
-  else {
-    Serial.print(F("mbus: bad frame: ")); 
-    MBusSize = print_bytes(mbus_data, sizeof(mbus_data));
-  }
-  for (int i = 0;i < dataList2.size(); i++) {
-    Serial.print(dataList2.get(i));
-  }
-}
-
-void setHeartbeatInterval(uint32_t interval) { // Set heartbeat interval. Value in seconds. Minimum value is at 900 seconds
-  if (interval > 900) {
-    heartbeatInterval = interval;
-  }
-  else {
-    heartbeatInterval = 900;
-  }
-  return;
-}
-
-LinkedList<byte> createHeartbeat() { // TODO: test. Create a heartbeat message, should be the periodical confirmed Uplink. Resulting downlink should echo the heartbeat number and contain Unix time to sync
-  LinkedList<byte> payload;
-  payload.add(HEARTBEAT);
-  char binaryInterval[4];
-  memcpy(binaryInterval, &heartbeatInterval, sizeof(heartbeatInterval));
-  for (uint8_t i = 0; i > sizeof(binaryInterval); i++) {
-    payload.add(binaryInterval[i]);
-  }
-
-  return payload;
-}
-
-uint32_t setUplinkInterval(uint32_t interval) { // Allows setting a minimum uplink interval. Checks if the chosen value lies within the allowed airtime if not the interval defaults to the lowest allowed value
-  uint8_t dataRate = modem.getDataRate();
-  uint32_t bandWidth = getBandWidth(dataRate);
-  uint8_t spreadingFactor = getSpreadingFactor(dataRate);
-  float minPackageTime = getPackageTime(spreadingFactor, bandWidth, 1);
-  if (interval < minPackageTime) {
-    interval = minPackageTime;
-    Serial.println("Requested interval lower than shortest allowed, setting as shortest allowed");
-  }
-  Serial.println(interval);
-  return interval;
-}
-
-uint8_t getSpreadingFactor(uint8_t dataRate) { // Gets the spreadingfactor value of the given datarate
-  uint8_t spreadingFactor;
-  
-  if (dataRate == 6) {
-    spreadingFactor = 7;
-  }
-  else {
-    uint8_t spreadingFactor = 12 - dataRate;
-  }
-  Serial.println(spreadingFactor);
-  return spreadingFactor;
-}
-
-uint32_t getBandWidth(uint8_t dataRate) { // Gets the bandwidth of the given datarate
-  uint32_t bandWidth;
-  if (dataRate == 6) {
-    bandWidth = 250000;
-  }
-  else {
-    bandWidth = 125000;
-  }
-  return bandWidth;
-}
-
-uint8_t getPayloadMaxLength(uint8_t spreadingFactor) { // Returns the maximum payload length in bytes for each spreading factor. 
-  uint8_t maxPayloadLength;
-  switch (spreadingFactor)
-  {
-  case 7:
-    maxPayloadLength = 222;  
-    break;
-  case 8:
-    maxPayloadLength = 222;  
-    break;
-  case 9:
-    maxPayloadLength = 115;  
-    break;
-  case 10:
-    maxPayloadLength = 51;  
-    break;
-  case 11:
-    maxPayloadLength = 51;  
-    break;
-  case 12:
-    maxPayloadLength = 51;
-    break;
-  }
-  return maxPayloadLength;
-}
-
-float getPackageTime(uint8_t spreadingFactor, uint32_t bandwidth, uint8_t payloadLength) { // Returns the minimum interval between packages of the given specification in ms
-  // See this page for formulas https://www.rfwireless-world.com/calculators/LoRaWAN-Airtime-calculator.html
-  // Use this value for setting a minimum delay after transmission
-  // Duty cycle restrictions are 1% in EU868 band, hence packageTime is packageAirTime * 100
-  uint8_t codingRate = 1;
-  uint8_t preableSymb = 8;
-  uint16_t payloadSymb = 8 + ((8 * payloadLength - 4 * spreadingFactor + 28 + 16) / (4 * spreadingFactor)) * (codingRate + 4);
-  uint16_t packageSymb = preableSymb + payloadSymb;
-  float timeSymb = pow(2, spreadingFactor) / (bandwidth/1000);
-  float packageAirTime = packageSymb * timeSymb;
-  float packageTime = packageAirTime * 100;
-  Serial.println(packageTime);
-  return packageTime;
-}
-
-void scheduleNextAction() { // Schedules the next function using Arduino-Timer
-  // Todo
-  timer_create_default();
-}
-
-/* uint32_t canSend() {
-  // Returns time in seconds before device is allowed to send next package. If 0 sending is allowed
-  // Todo, needs testing
-  int dataRate = modem.getDataRate();
-  uint16_t waitTime = getPackageTime(getSpreadingFactor(dataRate), getBandWidth(dataRate), lastPayloadLength) / 1000; // Get the time the previous package needs for duty cycle restrictions in seconds
-  time_t time = now();
-  time_t waitedTime = time - lastPackageTime;
-
-  uint16_t waitedTimeSeconds= waitedTime.hour()/3600 + waitedTime.minute()/60 + waitedTime.second();
-  
-  int remainingWaitTime = waitTime - waitedTimeSeconds;
-  if (remainingWaitTime > 0) {
-    return remainingWaitTime;
-  } 
-  else {
-    return 0;
-  }
-} */
-
-LinkedList<uint8_t> getUplinkClassMembers() { // TODO: Returns a list with addresses for devices with custom uplink recipe
-  LinkedList<uint8_t> list = LinkedList<uint8_t>();
-  for (uint8_t i = 0; i < deviceList.size(); i++) {
-    list.add(deviceList.get(i).getAddress()); 
-  }
-  return list; 
-}
-
-void resetArduino() { // Reset the device using the reset pin
-  pinMode(resetPin, OUTPUT);
-  delay(200);
-  digitalWrite(resetPin, HIGH);
-  Serial.println("Resetting device");
-  delay(2000);
-  digitalWrite(resetPin, LOW);
-}
-
-void reJoin() { // Rejoin the TTS instance. Can be requested from the TTS to ensure the device is reachable without waiting for a heartbeat
-  loraOTAAJoin(appKey, appEui);
-}
-
-void parseCayenne() {
-  // Todo
 }
 
 void loop() {
 
-
-
-  /*
-  // Old looping function, naively collects data from M-Bus devices and sends it via 64 byte payloads as uplinks
-
-  // If no error generate next package
-  if (err >= 0) {
-    // If telegram all sent, make new MBus request
-    if (usedBytes > MBusSize) {
-      // Make M-bus request, result is stored in dataList
-      Serial.println("requesting M-Bus address:");
-      Serial.println(addressList.get(addressNumber));
-      mbusRequest(addressList.get(addressNumber));
-      modem.setPort(addressList.get(addressNumber)); 
-      // Iterate for next request
-      addressNumber++;
-      usedBytes = 0;
-      // Reset number if end of list reached
-      if (addressNumber >= addressList.size()) {
-        addressNumber = 0;
-      }
-    }
-    // Empty packet variable
-    for (int i = 0; i < sizeof(packet); i++) {
-      packet[i] = {0};
-    }
-
-    for(int i = 0; i < maxPacketSize; i++) {
-      packet[i] = dataList2.get(0);
-      dataList2.remove(0);
-      usedBytes++;
-    }
-  }
-
-  Serial.println("packet is: ");
-  for (int i = 0; i < sizeof(packet); i++) {
-    Serial.print(packet[i]);
-  }
-  // Clear data packet and reset error  
-  modem.beginPacket();
-
-  // Print into data packet
-  modem.write(packet, sizeof(packet));
-
-  // Send data packet
-  err = modem.endPacket(false);
-  Serial.println(err);
-  if (err > 0) {
-      Serial.println("Message sent correctly!");
-    } else {
-      Serial.println("Error sending message :( retrying");
-    } 
-  for (int i = 0; i < 20; i++) {
-    Serial.print(".");
-    delay(1000);
-  }
-  Serial.println();
-  */
 }

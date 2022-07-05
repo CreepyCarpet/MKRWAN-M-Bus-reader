@@ -14,7 +14,9 @@ Further development will enable an application to choose the content of the upli
         </ul></li>
         <li><s>Set minimum interval</s></li>
         <li><s>Set specific interval</s></li>
-        <li>Test ADR functionality</li>
+        <li>Implement ADR functionality</li>
+        <li>Check for ADR req on downlinks and adjust datarate accordingly</li>
+        <li>Rebuild interval database with new ADR</li>
     </ul></li>
     <li><s>Heartbeat function</s></li>
     <li>Time keeping, time based events</li>
@@ -23,13 +25,13 @@ Further development will enable an application to choose the content of the upli
     </ul></li>
     <li>Downlink handling<ul>
         <li><s>Downlink switch statement</s></li>
-        <li>Get devices</li>
-        <li>Enable/Disable devices</li>
+        <li><s>Get devices</s></li>
+        <li><s>Enable/Disable devices</s></li>
         <li><s>Set uplink interval</s></li>
-        <li>Custom uplinks selection<ul> 
+        <li><s>Custom uplinks selection</s><ul> 
             <li><s>Choose specific datatypes/sensors to send as uplink</s></li>
             <li>Request custom uplink list</li>
-            <li>Per device specific packages</li>
+            <li><s>Per device specific packages</s></li>
             <li>Option for event based packages<ul>
                 <li>Delta before event?</li>
                 <li>Specific members are event-based</li>
@@ -39,8 +41,12 @@ Further development will enable an application to choose the content of the upli
             </ul></li>
         <li><s>Random join wait - Use deviceEUI as seed</s></li>
         <li><s>Increasing rejoin interval</s></li>
-        <li>Rescan M-Bus addresses command</li>
-        <li>Modify M-Bus scan command to only add new devices, perhaps throw the old list?</li>
+        <li><s>Rescan M-Bus addresses command</s></li>
+        <li><s>Modify M-Bus scan command to only add new devices, perhaps throw the old list?</s></li>
         <li><s>Forced rejoin</s></li>
+    </ul></li>
+    <li>Network optimization<ul>
+        <li>Prime number intervals?</li>
+        <li>Improved ALOHA</li>
     </ul></li>
 </ol>

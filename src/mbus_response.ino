@@ -1,4 +1,5 @@
 #include <HardwareSerial.h>
+#include <LinkedList.h>
  
 bool mbus_get_response(byte *pdata, unsigned char len_pdata) {
   byte bid = 0;             // current byte of response frame
@@ -110,4 +111,14 @@ int print_bytes(byte *bytes, unsigned char len_bytes) {
   } 
   Serial.println();
   return size;
+}
+
+// Returns a linkedlist of the mbus response formatted as bytes
+LinkedList<byte> get_bytes(byte *bytes, unsigned char len_bytes) {
+  uint8_t size = bytes[1];
+  for (uint8_t i = 0; i < len_bytes; i++) {
+    LinkedList<byte> byte_list = LinkedList<byte>();
+
+    return byte_list;
+  }
 }
